@@ -1,7 +1,13 @@
-use super::receiver::{self, Receiver};
-use crate::utils::{
-    buffer::{MediaData, MediaType},
-    Identity,
+use super::{
+    receiver::{self, Receiver},
+    // DispatcherReceiver,
+};
+use crate::{
+    errorln, fatalln,
+    utils::{
+        buffer::{MediaData, MediaType},
+        macros, Identity,
+    },
 };
 use std::{
     collections::{HashMap, LinkedList, VecDeque},
@@ -13,14 +19,16 @@ use std::{
     thread::{self, JoinHandle, Thread},
 };
 const INVALID_INDEX: u32 = std::u32::MAX;
+
+#[derive(Debug)]
 struct DataNotifier {
     pub audio_index: u32,
     pub video_index: u32,
 
     block: bool,
     read_index: u32,
-    receiver: Option<Weak<Receiver>>,
-    dispatcher: Option<Weak<Dispatcher>>,
+    receiver: Mutex<Weak<Receiver>>,
+    dispatcher: Mutex<Weak<Mutex<Dispatcher>>>,
 }
 
 impl DataNotifier {
@@ -31,8 +39,8 @@ impl DataNotifier {
 
             block: false,
             read_index: INVALID_INDEX,
-            receiver: None,
-            dispatcher: None,
+            receiver: Mutex::new(Weak::new()),
+            dispatcher: Mutex::new(Weak::new()),
         })
     }
 
@@ -40,18 +48,21 @@ impl DataNotifier {
         true
     }
 
-    pub fn set_listener(self: &Arc<Self>, new_dispatcher: &Arc<Dispatcher>) {
-        let mut dispatcher = &self.dispatcher;
-        dispatcher = &Some(Arc::downgrade(new_dispatcher));
+    pub fn set_receiver(&self, receiver: Arc<Receiver>) {
+        *self.receiver.lock().unwrap() = Arc::downgrade(&receiver);
     }
 
-    pub fn set_receiver(self: &Arc<Self>, new_receiver: &Arc<Receiver>) {
-        let mut receiver = &self.receiver;
-        receiver = &Some(Arc::downgrade(new_receiver));
+    pub fn notify_data_receiver(&self) {
+        println!("{:?}, notify data receiver 0", thread::current().id());
+        let temp = self.receiver.lock().unwrap().upgrade().unwrap();
+        println!("{:?}, notify data receiver 2", thread::current().id());
+
+        temp.on_video_data();
+        println!("{:?}, notify data receiver done", thread::current().id());
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct DataSample {
     reserve_falg: AtomicU16,
     media_data: Arc<Mutex<MediaData>>,
@@ -68,12 +79,12 @@ impl DataSample {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct DispatcherInner {
     running: bool,
     notify_mutex: Arc<Mutex<()>>,
     buffer_mutex: Arc<RwLock<()>>,
-    notifiers: HashMap<u32, Arc<DataNotifier>>,
+    notifiers: Arc<RwLock<HashMap<u32, Arc<DataNotifier>>>>,
     data_condvar: Arc<Condvar>,
 
     continue_notify: AtomicBool,
@@ -82,7 +93,7 @@ struct DispatcherInner {
     circular_buffer: VecDeque<DataSample>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Dispatcher {
     id: u32,
     inner: Arc<Mutex<DispatcherInner>>,
@@ -153,16 +164,23 @@ impl Dispatcher {
         inner.lock().unwrap().running = true;
         let mtx = inner.lock().unwrap().notify_mutex.clone();
         let condvar = inner.lock().unwrap().data_condvar.clone();
+        let notifiers = inner.lock().unwrap().notifiers.clone();
 
         self.notify_thread = Some(thread::spawn(move || {
             while inner.lock().unwrap().running {
-                println!("dispatch thread");
+                println!("{:?}, dispatch thread 1", thread::current().id());
+                let notifier = notifiers.read().unwrap();
+                let receiver = notifier.get(&0).unwrap().clone();
+                println!("{:?}, dispatch thread 2", thread::current().id());
+                receiver.notify_data_receiver();
+                println!("{:?}, dispatch thread 3", thread::current().id());
                 let _ = condvar.wait(mtx.lock().unwrap());
+                println!("{:?}, dispatch thread 4", thread::current().id());
             }
 
-            println!("exit here");
+            println!("{:?}, exit here", thread::current().id());
         }));
-        println!("dispatch started");
+        println!("{:?}, dispatch started", thread::current().id());
     }
 
     pub fn stop_dispatch(&mut self) {
@@ -180,17 +198,21 @@ impl Dispatcher {
         }
     }
 
-    pub fn attach_receiver(&mut self, receiver: &Arc<Receiver>) {
-        receiver.notify_read_start();
+    pub fn attach_receiver(&mut self, receiver: Arc<Receiver>) {
+        println!("{:?}, attach in", thread::current().id());
+        let c_receiver = receiver.clone();
+        c_receiver.notify_read_start();
 
         let notifier = DataNotifier::new();
-        notifier.set_receiver(receiver);
-
+        notifier.set_receiver(receiver.clone());
         self.inner
             .lock()
             .unwrap()
             .notifiers
-            .insert(receiver.get_id(), notifier);
+            .write()
+            .unwrap()
+            .insert(c_receiver.get_id(), notifier);
+        println!("{:?}, attach done", thread::current().id());
     }
 
     pub fn input_data(&mut self, data: Arc<Mutex<MediaData>>) {
@@ -200,7 +222,12 @@ impl Dispatcher {
         let inner = self.inner.clone();
         let pts = data.lock().unwrap().pts;
         let buff = data.lock().unwrap().buff.clone();
-        println!("input data, pts: {}, data: {:?}", pts, buff.lock().unwrap());
+        errorln!(
+            "{:?}, input data, pts: {}, data: {:?}",
+            thread::current().id(),
+            pts,
+            buff.lock().unwrap()
+        );
         inner.lock().unwrap().notify_mutex.lock().unwrap();
         let data_sample = DataSample::new(data);
         inner.lock().unwrap().circular_buffer.push_back(data_sample);
@@ -211,8 +238,27 @@ impl Dispatcher {
             .continue_notify
             .store(true, Ordering::Relaxed);
 
-        println!("notify data");
+        println!("{:?}, notify data", thread::current().id());
 
         inner.lock().unwrap().data_condvar.notify_all();
+    }
+
+    pub fn notify_read_ready(&mut self) {
+        let inner = self.inner.clone();
+        inner
+            .lock()
+            .unwrap()
+            .continue_notify
+            .store(true, Ordering::Relaxed);
+
+        inner.lock().unwrap().data_condvar.notify_one();
+    }
+
+    pub fn read_buffer_data(&mut self, media_type: MediaType) -> Arc<Mutex<MediaData>> {
+        println!("{:?}, read buffer data", thread::current().id());
+        let inner = self.inner.clone();
+        let binding = inner.lock().unwrap();
+        let data = binding.circular_buffer.back();
+        data.unwrap().media_data.clone()
     }
 }

@@ -1,13 +1,19 @@
-use crate::utils::{buffer::MediaType, Identity};
+use crate::utils::{
+    buffer::{MediaData, MediaType},
+    Identity,
+};
 use std::{
     borrow::BorrowMut,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex, Weak,
     },
+    thread, time,
 };
 
 use super::dispatcher::{self, Dispatcher};
+// use super::DispatcherReceiver;
+
 pub struct Receiver {
     id: u32,
     data_ready: AtomicBool,
@@ -25,7 +31,7 @@ pub struct Receiver {
 
     mix_read: AtomicBool,
     key_only: AtomicBool,
-    dispatcher: Option<Weak<Dispatcher>>,
+    dispatcher: Mutex<Weak<Mutex<Dispatcher>>>,
 }
 
 impl Identity for Receiver {
@@ -35,8 +41,8 @@ impl Identity for Receiver {
 }
 
 impl Receiver {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Receiver {
+    pub fn new() -> Self {
+        Receiver {
             id: 0,
             data_ready: AtomicBool::new(false),
             block_audio: AtomicBool::new(true),
@@ -50,16 +56,53 @@ impl Receiver {
             notify_data: Condvar::new(),
             mix_read: AtomicBool::new(false),
             key_only: AtomicBool::new(false),
-            dispatcher: None,
-        })
+            dispatcher: Mutex::new(Weak::new()),
+        }
     }
 
-    pub fn set_dispatcher(self: &Arc<Self>, new_dispatcher: &Arc<Dispatcher>) {
-        let mut dispatcher = &self.dispatcher;
-        dispatcher = &Some(Arc::downgrade(new_dispatcher));
+    pub fn set_dispatcher(&self, new_dispatcher: Arc<Mutex<Dispatcher>>) {
+        println!("{:?}, set dispatcher", thread::current().id());
+        let mut dispatcher = self.dispatcher.lock().unwrap();
+
+        let binding = Arc::downgrade(&new_dispatcher);
+        *dispatcher = binding;
     }
 
-    pub fn request_read(self: Arc<Self>, media_type: MediaType) {}
+    pub fn request_read(&self, media_type: MediaType) -> Arc<Mutex<MediaData>> {
+        println!("{:?}, request read", thread::current().id());
+        let dispatcher = self.dispatcher.lock().unwrap().upgrade().clone().unwrap();
+        // fix here
+        self.block_video.store(false, Ordering::Release);
+
+        if self.first_mix.load(Ordering::Relaxed) == true && media_type == MediaType::AV {
+            dispatcher.lock().unwrap().notify_read_ready();
+            self.mix_read.store(true, Ordering::Relaxed);
+            self.first_mix.store(false, Ordering::Relaxed);
+        } else if self.first_audio.load(Ordering::Relaxed) && media_type == MediaType::AUDIO {
+            dispatcher.lock().unwrap().notify_read_ready();
+            self.first_audio.store(false, Ordering::Relaxed);
+        } else if self.first_video.load(Ordering::Relaxed) && media_type == MediaType::VIDEO {
+            dispatcher.lock().unwrap().notify_read_ready();
+            self.first_video.store(false, Ordering::Relaxed);
+        }
+        println!("{:?}, request read 1", thread::current().id());
+        let lock = self.mutex.lock().unwrap();
+        println!("{:?}, request read 2", thread::current().id());
+        match media_type {
+            MediaType::AUDIO => self.notify_audio.wait(lock),
+            MediaType::VIDEO => self.notify_video.wait(lock),
+            MediaType::AV => self.notify_data.wait(lock),
+        };
+        println!("{:?}, request read 3", thread::current().id());
+        let x = dispatcher.lock().unwrap().read_buffer_data(media_type);
+        match media_type {
+            MediaType::AUDIO => self.block_audio.store(false, Ordering::Release),
+            MediaType::VIDEO => self.block_video.store(false, Ordering::Release),
+            MediaType::AV => self.data_ready.store(false, Ordering::Release),
+        };
+
+        x.clone()
+    }
 
     pub fn notify_read_start(&self) {
         self.first_audio.store(true, Ordering::Relaxed);
@@ -98,13 +141,18 @@ impl Receiver {
     }
 
     pub fn on_video_data(&self) {
+        println!("{:?}, on video", thread::current().id());
         let lk = self.mutex.lock().unwrap();
+        println!("{:?}, on video 1", thread::current().id());
         if self.block_video.load(Ordering::Relaxed) == true {
+            println!("{:?}, on video 2", thread::current().id());
             return;
         }
+        println!("{:?}, on video3", thread::current().id());
 
         self.block_video.store(true, Ordering::Relaxed);
         self.notify_video.notify_one();
         *lk;
+        println!("{:?}, on video 4", thread::current().id());
     }
 }

@@ -3,17 +3,24 @@ pub mod dispatcher;
 pub mod utils;
 use std::{
     borrow::BorrowMut,
+    panic::Location,
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::Duration,
 };
 
+// use dispatcher::DispatcherReceiver;
+
 use crate::{
-    dispatcher::{dispatcher::Dispatcher, receiver::Receiver},
+    dispatcher::{
+        dispatcher::Dispatcher,
+        receiver::{self, Receiver},
+    },
     utils::buffer::{MediaData, MediaType},
+    utils::macros,
 };
 struct BufferController {
-    dispatcher: Arc<Mutex<Dispatcher>>,
+    pub dispatcher: Arc<Mutex<Dispatcher>>,
     dummy_data: Vec<Arc<Mutex<MediaData>>>,
     dummy_count: u32,
     gop_size: u32,
@@ -66,7 +73,7 @@ impl BufferController {
     }
 
     fn start_write(&mut self) {
-        println!("start write");
+        infoln!("{:?}, start write", thread::current().id());
         let running = self.running.clone();
         let dummy = self.dummy_data.clone();
         let dispatcher = self.dispatcher.clone();
@@ -83,7 +90,7 @@ impl BufferController {
     }
 
     fn stop_write(&mut self) {
-        println!("stop write begin");
+        println!("{:?}, stop write begin", thread::current().id());
         self.dispatcher.lock().unwrap().stop_dispatch();
         *self.running.lock().unwrap() = false;
         self.write_thread
@@ -91,18 +98,81 @@ impl BufferController {
             .unwrap()
             .join()
             .expect("can not join the write thread");
-        println!("stop write end");
+        println!("{:?}, stop write end", thread::current().id());
+    }
+}
+
+struct BufferReceiver {
+    receiver: Arc<Receiver>,
+    read_thread: Option<JoinHandle<()>>,
+    reading: Arc<Mutex<bool>>,
+    count: Arc<Mutex<u32>>,
+    audio_count: Arc<Mutex<u32>>,
+    video_count: Arc<Mutex<u32>>,
+}
+
+impl BufferReceiver {
+    fn new(dispatcher: Arc<Mutex<Dispatcher>>) -> BufferReceiver {
+        let receiver = BufferReceiver {
+            receiver: Arc::new(Receiver::new()),
+            read_thread: None,
+            reading: Arc::new(Mutex::new(false)),
+            count: Arc::new(Mutex::new(0)),
+            audio_count: Arc::new(Mutex::new(0)),
+            video_count: Arc::new(Mutex::new(0)),
+        };
+
+        dispatcher
+            .lock()
+            .unwrap()
+            .attach_receiver(receiver.receiver.clone());
+
+        receiver.receiver.set_dispatcher(dispatcher.clone());
+
+        receiver
+    }
+
+    fn start_read(&mut self, media_type: MediaType) {
+        debugln!("{:?}, start read", thread::current().id());
+        let reading = self.reading.clone();
+        *reading.lock().unwrap() = true;
+        let receiver = self.receiver.clone();
+        let count = self.count.clone();
+        let audio_count = self.audio_count.clone();
+        let video_count = self.video_count.clone();
+        self.read_thread = Some(thread::spawn(move || {
+            while *reading.lock().unwrap() {
+                println!("{:?}, read loop", thread::current().id());
+                let out_data = receiver.request_read(media_type);
+                let data = out_data.lock().unwrap();
+                *count.lock().unwrap() += 1;
+                match media_type {
+                    MediaType::AUDIO => *audio_count.lock().unwrap() += 1,
+                    MediaType::VIDEO => *video_count.lock().unwrap() += 1,
+                    _ => {}
+                }
+
+                fatalln!(
+                    "read_type: {:?}, out_type: {:?}, pts: {:?}",
+                    media_type,
+                    data.media_type,
+                    data.pts
+                )
+            }
+        }));
     }
 }
 
 fn main() {
-    let mut controller = BufferController::new(1000);
-    println!("start");
+    let mut controller = BufferController::new(100);
+    debugln!("{:?}, start", thread::current().id());
     controller.generate_av_data();
-    controller.start_write();
 
+    let mut receiver = BufferReceiver::new(controller.dispatcher.clone());
+    controller.start_write();
+    receiver.start_read(MediaType::VIDEO);
     while *controller.running.lock().unwrap() == true {
-        println!("wait 1s");
+        println!("{:?}, wait 1s", thread::current().id());
         thread::sleep(Duration::from_secs(1));
     }
 

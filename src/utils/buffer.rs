@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaType {
     #[default]
     AV,
@@ -12,7 +12,7 @@ pub trait Identity {
     fn get_id(&self) -> u32;
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct MediaData {
     pub key_frame: bool,
     pub pts: u64,
