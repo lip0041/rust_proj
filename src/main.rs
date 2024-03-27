@@ -3,9 +3,11 @@ pub mod dispatcher;
 pub mod utils;
 use std::{
     borrow::BorrowMut,
+    fmt::Debug,
     panic::Location,
+    process,
     sync::{Arc, Mutex},
-    thread::{self, JoinHandle},
+    thread::{self, JoinHandle, ThreadId},
     time::Duration,
 };
 
@@ -73,7 +75,7 @@ impl BufferController {
     }
 
     fn start_write(&mut self) {
-        infoln!("{:?}, start write", thread::current().id());
+        info!("start write");
         let running = self.running.clone();
         let dummy = self.dummy_data.clone();
         let dispatcher = self.dispatcher.clone();
@@ -90,7 +92,7 @@ impl BufferController {
     }
 
     fn stop_write(&mut self) {
-        println!("{:?}, stop write begin", thread::current().id());
+        debug!("stop write begin");
         self.dispatcher.lock().unwrap().stop_dispatch();
         *self.running.lock().unwrap() = false;
         self.write_thread
@@ -98,7 +100,7 @@ impl BufferController {
             .unwrap()
             .join()
             .expect("can not join the write thread");
-        println!("{:?}, stop write end", thread::current().id());
+        debug!("stop write end");
     }
 }
 
@@ -133,7 +135,7 @@ impl BufferReceiver {
     }
 
     fn start_read(&mut self, media_type: MediaType) {
-        debugln!("{:?}, start read", thread::current().id());
+        debug!("start read");
         let reading = self.reading.clone();
         *reading.lock().unwrap() = true;
         let receiver = self.receiver.clone();
@@ -142,7 +144,7 @@ impl BufferReceiver {
         let video_count = self.video_count.clone();
         self.read_thread = Some(thread::spawn(move || {
             while *reading.lock().unwrap() {
-                println!("{:?}, read loop", thread::current().id());
+                debug!("read loop");
                 let out_data = receiver.request_read(media_type);
                 let data = out_data.lock().unwrap();
                 *count.lock().unwrap() += 1;
@@ -152,27 +154,28 @@ impl BufferReceiver {
                     _ => {}
                 }
 
-                fatalln!(
+                fatal!(
                     "read_type: {:?}, out_type: {:?}, pts: {:?}",
                     media_type,
                     data.media_type,
                     data.pts
-                )
+                );
             }
         }));
     }
 }
 
 fn main() {
-    let mut controller = BufferController::new(100);
-    debugln!("{:?}, start", thread::current().id());
+    let mut controller = BufferController::new(30);
     controller.generate_av_data();
 
     let mut receiver = BufferReceiver::new(controller.dispatcher.clone());
+    thread::sleep(Duration::from_millis(500));
     controller.start_write();
+
     receiver.start_read(MediaType::VIDEO);
     while *controller.running.lock().unwrap() == true {
-        println!("{:?}, wait 1s", thread::current().id());
+        debug!("wait 1s");
         thread::sleep(Duration::from_secs(1));
     }
 

@@ -2,6 +2,7 @@ use crate::utils::{
     buffer::{MediaData, MediaType},
     Identity,
 };
+use crate::{debug, error, fatal, info, warn};
 use std::{
     borrow::BorrowMut,
     sync::{
@@ -61,7 +62,7 @@ impl Receiver {
     }
 
     pub fn set_dispatcher(&self, new_dispatcher: Arc<Mutex<Dispatcher>>) {
-        println!("{:?}, set dispatcher", thread::current().id());
+        debug!("set dispatcher");
         let mut dispatcher = self.dispatcher.lock().unwrap();
 
         let binding = Arc::downgrade(&new_dispatcher);
@@ -69,7 +70,7 @@ impl Receiver {
     }
 
     pub fn request_read(&self, media_type: MediaType) -> Arc<Mutex<MediaData>> {
-        println!("{:?}, request read", thread::current().id());
+        debug!("request read");
         let dispatcher = self.dispatcher.lock().unwrap().upgrade().clone().unwrap();
         // fix here
         self.block_video.store(false, Ordering::Release);
@@ -85,15 +86,15 @@ impl Receiver {
             dispatcher.lock().unwrap().notify_read_ready();
             self.first_video.store(false, Ordering::Relaxed);
         }
-        println!("{:?}, request read 1", thread::current().id());
+        debug!("request read 1");
         let lock = self.mutex.lock().unwrap();
-        println!("{:?}, request read 2", thread::current().id());
+        debug!("request read 2");
         match media_type {
             MediaType::AUDIO => self.notify_audio.wait(lock),
             MediaType::VIDEO => self.notify_video.wait(lock),
             MediaType::AV => self.notify_data.wait(lock),
         };
-        println!("{:?}, request read 3", thread::current().id());
+        debug!("request read 3");
         let x = dispatcher.lock().unwrap().read_buffer_data(media_type);
         match media_type {
             MediaType::AUDIO => self.block_audio.store(false, Ordering::Release),
@@ -141,18 +142,18 @@ impl Receiver {
     }
 
     pub fn on_video_data(&self) {
-        println!("{:?}, on video", thread::current().id());
+        debug!("on video");
         let lk = self.mutex.lock().unwrap();
-        println!("{:?}, on video 1", thread::current().id());
+        debug!("on video 1");
         if self.block_video.load(Ordering::Relaxed) == true {
-            println!("{:?}, on video 2", thread::current().id());
+            debug!("on video 2");
             return;
         }
-        println!("{:?}, on video3", thread::current().id());
+        debug!("on video3");
 
         self.block_video.store(true, Ordering::Relaxed);
         self.notify_video.notify_one();
         *lk;
-        println!("{:?}, on video 4", thread::current().id());
+        debug!("on video 4");
     }
 }

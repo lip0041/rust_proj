@@ -2,13 +2,11 @@ use super::{
     receiver::{self, Receiver},
     // DispatcherReceiver,
 };
-use crate::{
-    errorln, fatalln,
-    utils::{
-        buffer::{MediaData, MediaType},
-        macros, Identity,
-    },
+use crate::utils::{
+    buffer::{MediaData, MediaType},
+    Identity,
 };
+use crate::{debug, error, fatal, info, warn};
 use std::{
     collections::{HashMap, LinkedList, VecDeque},
     ops::{Deref, DerefMut},
@@ -53,12 +51,12 @@ impl DataNotifier {
     }
 
     pub fn notify_data_receiver(&self) {
-        println!("{:?}, notify data receiver 0", thread::current().id());
+        debug!("notify data receiver 0");
         let temp = self.receiver.lock().unwrap().upgrade().unwrap();
-        println!("{:?}, notify data receiver 2", thread::current().id());
+        debug!("notify data receiver 2");
 
         temp.on_video_data();
-        println!("{:?}, notify data receiver done", thread::current().id());
+        debug!("notify data receiver done");
     }
 }
 
@@ -168,19 +166,20 @@ impl Dispatcher {
 
         self.notify_thread = Some(thread::spawn(move || {
             while inner.lock().unwrap().running {
-                println!("{:?}, dispatch thread 1", thread::current().id());
+                debug!("dispatch thread 1");
                 let notifier = notifiers.read().unwrap();
                 let receiver = notifier.get(&0).unwrap().clone();
-                println!("{:?}, dispatch thread 2", thread::current().id());
+                debug!("dispatch thread 2");
                 receiver.notify_data_receiver();
-                println!("{:?}, dispatch thread 3", thread::current().id());
+                debug!("dispatch thread 3");
                 let _ = condvar.wait(mtx.lock().unwrap());
-                println!("{:?}, dispatch thread 4", thread::current().id());
+                debug!("dispatch thread 4");
             }
 
-            println!("{:?}, exit here", thread::current().id());
+            debug!("exit here");
         }));
-        println!("{:?}, dispatch started", thread::current().id());
+        debug!("dispatch started");
+        println!();
     }
 
     pub fn stop_dispatch(&mut self) {
@@ -199,7 +198,7 @@ impl Dispatcher {
     }
 
     pub fn attach_receiver(&mut self, receiver: Arc<Receiver>) {
-        println!("{:?}, attach in", thread::current().id());
+        debug!("attach in {}", file!());
         let c_receiver = receiver.clone();
         c_receiver.notify_read_start();
 
@@ -212,7 +211,7 @@ impl Dispatcher {
             .write()
             .unwrap()
             .insert(c_receiver.get_id(), notifier);
-        println!("{:?}, attach done", thread::current().id());
+        debug!("attach done");
     }
 
     pub fn input_data(&mut self, data: Arc<Mutex<MediaData>>) {
@@ -222,12 +221,7 @@ impl Dispatcher {
         let inner = self.inner.clone();
         let pts = data.lock().unwrap().pts;
         let buff = data.lock().unwrap().buff.clone();
-        errorln!(
-            "{:?}, input data, pts: {}, data: {:?}",
-            thread::current().id(),
-            pts,
-            buff.lock().unwrap()
-        );
+        info!("input data, pts: {}", pts);
         inner.lock().unwrap().notify_mutex.lock().unwrap();
         let data_sample = DataSample::new(data);
         inner.lock().unwrap().circular_buffer.push_back(data_sample);
@@ -238,7 +232,7 @@ impl Dispatcher {
             .continue_notify
             .store(true, Ordering::Relaxed);
 
-        println!("{:?}, notify data", thread::current().id());
+        debug!("notify data");
 
         inner.lock().unwrap().data_condvar.notify_all();
     }
@@ -255,7 +249,7 @@ impl Dispatcher {
     }
 
     pub fn read_buffer_data(&mut self, media_type: MediaType) -> Arc<Mutex<MediaData>> {
-        println!("{:?}, read buffer data", thread::current().id());
+        debug!("read buffer data");
         let inner = self.inner.clone();
         let binding = inner.lock().unwrap();
         let data = binding.circular_buffer.back();
