@@ -142,26 +142,55 @@ impl BufferReceiver {
         let count = self.count.clone();
         let audio_count = self.audio_count.clone();
         let video_count = self.video_count.clone();
+
         self.read_thread = Some(thread::spawn(move || {
             while *reading.lock().unwrap() {
-                debug!("read loop");
                 let out_data = receiver.request_read(media_type);
                 let data = out_data.lock().unwrap();
-                *count.lock().unwrap() += 1;
+
                 match media_type {
                     MediaType::AUDIO => *audio_count.lock().unwrap() += 1,
                     MediaType::VIDEO => *video_count.lock().unwrap() += 1,
-                    _ => {}
+                    MediaType::AV => *count.lock().unwrap() += 1,
                 }
 
-                fatal!(
+                warn!(
                     "read_type: {:?}, out_type: {:?}, pts: {:?}",
-                    media_type,
-                    data.media_type,
-                    data.pts
+                    media_type, data.media_type, data.pts
                 );
             }
+
+            match media_type {
+                MediaType::AUDIO => fatal!(
+                    "read_type: {:?}, read done, read count: {}",
+                    media_type,
+                    *audio_count.lock().unwrap()
+                ),
+                MediaType::VIDEO => fatal!(
+                    "read_type: {:?}, read done, read count: {}",
+                    media_type,
+                    *video_count.lock().unwrap()
+                ),
+                MediaType::AV => fatal!(
+                    "read_type: {:?}, read done, read count: {}",
+                    media_type,
+                    *count.lock().unwrap()
+                ),
+            }
         }));
+    }
+
+    fn stop_read(&mut self) {
+        debug!("stop read begin");
+        *self.reading.lock().unwrap() = false;
+        self.receiver.notify_read_stop();
+        self.read_thread
+            .take()
+            .unwrap()
+            .join()
+            .expect("can not join the write thread");
+
+        debug!("stop read end");
     }
 }
 
@@ -175,9 +204,10 @@ fn main() {
 
     receiver.start_read(MediaType::VIDEO);
     while *controller.running.lock().unwrap() == true {
-        debug!("wait 1s");
+        warn!("wait 1s");
         thread::sleep(Duration::from_secs(1));
     }
 
     controller.stop_write();
+    receiver.stop_read();
 }

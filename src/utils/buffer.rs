@@ -8,10 +8,6 @@ pub enum MediaType {
     VIDEO,
 }
 
-pub trait Identity {
-    fn get_id(&self) -> u32;
-}
-
 #[derive(Default, Debug)]
 pub struct MediaData {
     pub key_frame: bool,

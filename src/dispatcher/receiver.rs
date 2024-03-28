@@ -76,14 +76,23 @@ impl Receiver {
         self.block_video.store(false, Ordering::Release);
 
         if self.first_mix.load(Ordering::Relaxed) == true && media_type == MediaType::AV {
-            dispatcher.lock().unwrap().notify_read_ready();
+            dispatcher
+                .lock()
+                .unwrap()
+                .notify_read_ready(self.get_id(), media_type);
             self.mix_read.store(true, Ordering::Relaxed);
             self.first_mix.store(false, Ordering::Relaxed);
         } else if self.first_audio.load(Ordering::Relaxed) && media_type == MediaType::AUDIO {
-            dispatcher.lock().unwrap().notify_read_ready();
+            dispatcher
+                .lock()
+                .unwrap()
+                .notify_read_ready(self.get_id(), media_type);
             self.first_audio.store(false, Ordering::Relaxed);
         } else if self.first_video.load(Ordering::Relaxed) && media_type == MediaType::VIDEO {
-            dispatcher.lock().unwrap().notify_read_ready();
+            dispatcher
+                .lock()
+                .unwrap()
+                .notify_read_ready(self.get_id(), media_type);
             self.first_video.store(false, Ordering::Relaxed);
         }
         debug!("request read 1");
