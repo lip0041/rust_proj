@@ -26,7 +26,6 @@ struct DataNotifier {
     block: bool,
     read_index: u32,
     receiver: Mutex<Weak<Receiver>>,
-    dispatcher: Mutex<Weak<Mutex<Dispatcher>>>,
 }
 
 impl DataNotifier {
@@ -38,68 +37,54 @@ impl DataNotifier {
             block: false,
             read_index: INVALID_INDEX,
             receiver: Mutex::new(Weak::new()),
-            dispatcher: Mutex::new(Weak::new()),
         }))
-    }
-
-    pub fn data_avaliable(&mut self, media_type: MediaType) -> bool {
-        let dispatcher = self.dispatcher.lock().unwrap().upgrade().unwrap().clone();
-        let receiver_id = self
-            .receiver
-            .lock()
-            .unwrap()
-            .upgrade()
-            .unwrap()
-            .clone()
-            .get_id();
-        match media_type {
-            MediaType::VIDEO => {
-                self.audio_index = dispatcher
-                    .lock()
-                    .unwrap()
-                    .find_next_index(self.audio_index, media_type);
-
-                return !dispatcher
-                    .lock()
-                    .unwrap()
-                    .is_read(receiver_id, self.audio_index);
-            }
-            MediaType::AUDIO => {
-                self.video_index = dispatcher
-                    .lock()
-                    .unwrap()
-                    .find_next_index(self.video_index, media_type);
-
-                return !dispatcher
-                    .lock()
-                    .unwrap()
-                    .is_read(receiver_id, self.video_index);
-            }
-            MediaType::AV => {
-                self.video_index = dispatcher
-                    .lock()
-                    .unwrap()
-                    .find_next_index(self.video_index, media_type);
-
-                return !dispatcher
-                    .lock()
-                    .unwrap()
-                    .is_read(receiver_id, self.video_index);
-            }
-        }
     }
 
     pub fn set_receiver(&self, receiver: Arc<Receiver>) {
         *self.receiver.lock().unwrap() = Arc::downgrade(&receiver);
     }
 
-    pub fn notify_data_receiver(&self) {
-        debug!("notify data receiver 0");
-        let temp = self.receiver.lock().unwrap().upgrade().unwrap();
-        debug!("notify data receiver 2");
+    pub fn is_mixed(&self) -> bool {
+        let receiver = self.receiver.lock().unwrap().upgrade().unwrap().clone();
+        receiver.is_mix_read()
+    }
 
-        temp.on_video_data();
-        debug!("notify data receiver done");
+    pub fn notify_data_receiver(&self, media_type: MediaType) {
+        debug!("notify_data_receiver");
+        let receiver = self.receiver.lock().unwrap().upgrade();
+        if receiver.is_none() || self.block {
+            warn!("receiver is none");
+            return;
+        }
+        match media_type {
+            MediaType::AUDIO => receiver.unwrap().on_audio_data(),
+            MediaType::VIDEO => receiver.unwrap().on_video_data(),
+            MediaType::AV => receiver.unwrap().on_media_data(),
+        }
+    }
+
+    pub fn get_receiver_read_index(&self, media_type: MediaType) -> u32 {
+        match media_type {
+            MediaType::AUDIO => self.audio_index,
+            MediaType::VIDEO => self.video_index,
+            MediaType::AV => {
+                if self.audio_index != INVALID_INDEX && self.video_index != INVALID_INDEX {
+                    if self.audio_index <= self.video_index {
+                        self.audio_index
+                    } else {
+                        self.video_index
+                    }
+                } else if self.audio_index == INVALID_INDEX && self.video_index == INVALID_INDEX {
+                    INVALID_INDEX
+                } else {
+                    if self.audio_index == INVALID_INDEX {
+                        self.video_index
+                    } else {
+                        self.audio_index
+                    }
+                }
+            }
+        }
     }
 
     fn set_read_index(&mut self, index: u32) {
@@ -122,7 +107,7 @@ impl DataSample {
     fn new(data: Arc<Mutex<MediaData>>) -> Self {
         DataSample {
             reserve_flag: AtomicU16::new(0),
-            media_data: data,
+            media_data: data.clone(),
             seq: 0,
         }
     }
@@ -218,16 +203,36 @@ impl Dispatcher {
 
         self.notify_thread = Some(thread::spawn(move || {
             while inner.lock().unwrap().running {
-                debug!("dispatch 1");
-                let notifiers = notifiers.read().unwrap();
-                for (receiver_id, notifier) in notifiers.clone() {
-                    debug!("dispatch 2");
-                    notifier.lock().unwrap().notify_data_receiver();
-                    debug!("dispatch 2");
+                warn!("in notify thread");
+                let data_ref = inner.lock().unwrap().data_ref.load(Ordering::Relaxed);
+                let recv_ref = inner.lock().unwrap().recv_ref.load(Ordering::Relaxed);
+                let notify_ref = data_ref & recv_ref;
+                for (recv_id, notifier) in notifiers.read().unwrap().clone() {
+                    let read_index = notifier.lock().unwrap().get_read_index();
+                    if 0x0001 << (read_index * 2) & notify_ref != 0
+                        || 0x0001 << (read_index * 2 + 1) & notify_ref != 0
+                    {
+                        let mixed = notifier.lock().unwrap().is_mixed();
+                        if mixed {
+                            notifier.lock().unwrap().notify_data_receiver(MediaType::AV);
+                        } else {
+                            if 0x0001 << (read_index * 2) & notify_ref != 0 {
+                                notifier
+                                    .lock()
+                                    .unwrap()
+                                    .notify_data_receiver(MediaType::AUDIO);
+                            } else if 0x0001 << (read_index * 2 + 1) & notify_ref != 0 {
+                                notifier
+                                    .lock()
+                                    .unwrap()
+                                    .notify_data_receiver(MediaType::VIDEO);
+                            }
+                        }
+                    }
                 }
-                debug!("dispatch 3");
+                warn!("before wait");
                 let _unused = condvar.wait(mtx.lock().unwrap());
-                debug!("dispatch 4");
+                warn!("after wait");
                 continue_notify.store(false, Ordering::Relaxed);
             }
         }));
@@ -251,8 +256,8 @@ impl Dispatcher {
 
     pub fn attach_receiver(&mut self, receiver: Arc<Receiver>) {
         debug!("attach in");
-        let c_receiver = receiver.clone();
-        c_receiver.notify_read_start();
+        let receiver = receiver.clone();
+        receiver.notify_read_start();
 
         if self.read_flag == 0xffffu16 as i16 {
             error!("receiver limited!");
@@ -268,7 +273,7 @@ impl Dispatcher {
             .notifiers
             .write()
             .unwrap()
-            .insert(c_receiver.get_id(), base_notifier.clone());
+            .insert(receiver.get_id(), base_notifier.clone());
 
         let mut notifier = base_notifier.lock().unwrap();
         notifier.set_receiver(receiver.clone());
@@ -288,16 +293,15 @@ impl Dispatcher {
             read_index += 1;
         }
 
+        receiver.set_read_index(read_index);
         notifier.set_read_index(read_index);
 
-        debug!("attach in");
         if inner.lock().unwrap().circular_buffer.is_empty() {
-            debug!("attach in");
             notifier.audio_index = INVALID_INDEX;
             notifier.video_index = INVALID_INDEX;
-            // Mutex::unlock(notifier);
-            self.set_receiver_data_ref(receiver.get_id(), MediaType::AUDIO, false);
-            self.set_receiver_data_ref(receiver.get_id(), MediaType::VIDEO, false);
+            drop(notifier);
+            self.set_receiver_data_ref(receiver.get_read_index(), MediaType::AUDIO, false);
+            self.set_receiver_data_ref(receiver.get_read_index(), MediaType::VIDEO, false);
             self.video_activate = true;
             self.audio_activate = true;
             debug!("attach done");
@@ -306,9 +310,10 @@ impl Dispatcher {
 
         if self.data_mode == MediaType::AUDIO {
             notifier.audio_index = (inner.lock().unwrap().circular_buffer.len() - 1) as u32;
-            self.set_receiver_data_ref(receiver.get_id(), MediaType::AUDIO, true);
             notifier.video_index = INVALID_INDEX;
-            self.set_receiver_data_ref(receiver.get_id(), MediaType::VIDEO, false);
+            drop(notifier);
+            self.set_receiver_data_ref(receiver.get_read_index(), MediaType::AUDIO, true);
+            self.set_receiver_data_ref(receiver.get_read_index(), MediaType::VIDEO, false);
         } else {
             if self.key_index.is_empty() {
                 let temp_index =
@@ -320,20 +325,22 @@ impl Dispatcher {
                 }
 
                 notifier.video_index = *self.key_index.back().unwrap();
+                drop(notifier);
                 self.set_receiver_data_ref(
-                    receiver.get_id(),
+                    receiver.get_read_index(),
                     MediaType::AUDIO,
                     temp_index != INVALID_INDEX,
                 );
-                self.set_receiver_data_ref(receiver.get_id(), MediaType::VIDEO, true);
+                self.set_receiver_data_ref(receiver.get_read_index(), MediaType::VIDEO, true);
                 if self.last_audio_index == INVALID_INDEX {
                     self.audio_activate = true;
                 }
             } else {
                 notifier.audio_index = self.find_last_index(MediaType::AUDIO);
                 notifier.video_index = INVALID_INDEX;
-                self.set_receiver_data_ref(receiver.get_id(), MediaType::AUDIO, true);
-                self.set_receiver_data_ref(receiver.get_id(), MediaType::VIDEO, false);
+                drop(notifier);
+                self.set_receiver_data_ref(receiver.get_read_index(), MediaType::AUDIO, true);
+                self.set_receiver_data_ref(receiver.get_read_index(), MediaType::VIDEO, false);
                 if self.last_audio_index == INVALID_INDEX {
                     self.audio_activate = true;
                 }
@@ -343,29 +350,131 @@ impl Dispatcher {
     }
 
     pub fn input_data(&mut self, data: Arc<Mutex<MediaData>>) {
+        debug!("trace");
         if !self.writing {
             self.writing = true;
         }
         let inner = self.inner.clone();
         let pts = data.lock().unwrap().pts;
         let buff = data.lock().unwrap().buff.clone();
-        info!("input data, pts: {}", pts);
-        inner.lock().unwrap().notify_mutex.lock().unwrap();
-        let data_sample = DataSample::new(data);
+        let key_frame = data.lock().unwrap().key_frame;
+        let media_type = data.lock().unwrap().media_type;
+        info!(
+            "input data, pts: {}, key_frame: {}, media_type: {:?}",
+            pts, key_frame, media_type
+        );
+
+        let data_sample = DataSample::new(data.clone());
+
         inner.lock().unwrap().circular_buffer.push_back(data_sample);
 
+        let buffer_len = inner.lock().unwrap().circular_buffer.len() as u32;
+
+        let data = data.lock().unwrap();
+        if key_frame {
+            fatal!("input key frame, cur_len: {}", buffer_len);
+            self.audio_activate = true;
+            self.video_activate = true;
+        }
+
+        if media_type == MediaType::AUDIO {
+            self.last_audio_index = buffer_len - 1;
+            self.activate_data_ref(MediaType::AUDIO, false);
+            self.audio_frames += 1;
+        } else {
+            self.last_video_index = buffer_len - 1;
+            self.activate_data_ref(MediaType::VIDEO, key_frame);
+            self.video_frames += 1;
+        }
+
+        if self.audio_activate && media_type == MediaType::AUDIO {
+            self.activate_receiver_index(buffer_len - 1, MediaType::AUDIO);
+        }
+
+        if self.video_activate && key_frame {
+            self.activate_receiver_index(buffer_len - 1, MediaType::VIDEO);
+        }
         inner
             .lock()
             .unwrap()
             .continue_notify
             .store(true, Ordering::Relaxed);
-
-        debug!("notify data");
-
         inner.lock().unwrap().data_condvar.notify_all();
+        debug!("input done");
     }
 
-    pub fn notify_read_ready(&mut self, receiver_id: u32, media_type: MediaType) {
+    fn activate_data_ref(&mut self, media_type: MediaType, key_frame: bool) {
+        let mut bit_ref = 0x0000;
+        let inner = self.inner.clone();
+        let notifiers = inner.lock().unwrap().notifiers.write().unwrap().clone();
+        for (recv_id, notifier) in notifiers {
+            let index = notifier.lock().unwrap().get_read_index();
+            if media_type == MediaType::AUDIO {
+                bit_ref |= 0x1 << (index * 2);
+                continue;
+            }
+            if index != INVALID_INDEX {
+                bit_ref |= 0x1 << (index * 2 + 1);
+            }
+        }
+
+        inner
+            .lock()
+            .unwrap()
+            .data_ref
+            .fetch_or(bit_ref, Ordering::Relaxed);
+    }
+
+    fn activate_receiver_index(&mut self, index: u32, media_type: MediaType) {
+        let inner = self.inner.clone();
+        let notifiers = inner.lock().unwrap().notifiers.write().unwrap().clone();
+        for (recv_id, notifier) in notifiers {
+            let mut notifier = notifier.lock().unwrap();
+            let circular_buffer = &inner.lock().unwrap().circular_buffer;
+            if media_type == MediaType::VIDEO {
+                if notifier.video_index != index
+                    && (notifier.video_index == INVALID_INDEX
+                        || self.is_read(
+                            notifier.get_read_index(),
+                            notifier.video_index,
+                            circular_buffer,
+                        ))
+                {
+                    notifier.video_index = index;
+                    fatal!(
+                        "recv_id: {}, activate video: {}",
+                        recv_id,
+                        notifier.video_index
+                    );
+                }
+            } else {
+                if notifier.audio_index != index
+                    && (notifier.audio_index == INVALID_INDEX
+                        || self.is_read(
+                            notifier.get_read_index(),
+                            notifier.audio_index,
+                            circular_buffer,
+                        ))
+                {
+                    notifier.audio_index = index;
+                    fatal!(
+                        "recv_id: {}, activate audio: {}",
+                        recv_id,
+                        notifier.audio_index
+                    );
+                }
+            }
+        }
+
+        if media_type == MediaType::VIDEO {
+            self.video_activate = false;
+        } else {
+            self.audio_activate = false;
+        }
+    }
+
+    pub fn notify_read_ready(&mut self, recv_id: u32, media_type: MediaType) {
+        info!("notify read ready");
         let inner = self.inner.clone();
 
         let notifier = inner
@@ -374,56 +483,193 @@ impl Dispatcher {
             .notifiers
             .read()
             .unwrap()
-            .get(&receiver_id)
+            .get(&recv_id)
             .unwrap()
             .clone();
 
+        let read_index = notifier.lock().unwrap().get_read_index();
         if media_type == MediaType::AV {
-            self.set_receiver_read_ref(receiver_id, MediaType::AUDIO, true);
-            self.set_receiver_read_ref(receiver_id, MediaType::VIDEO, true);
+            self.set_receiver_read_ref(read_index, MediaType::AUDIO, true);
+            self.set_receiver_read_ref(read_index, MediaType::VIDEO, true);
         } else {
-            self.set_receiver_read_ref(receiver_id, media_type, true);
+            self.set_receiver_read_ref(read_index, media_type, true);
         }
 
-        let data_avaliable = notifier.lock().unwrap().data_avaliable(media_type);
+        let mut data_available = false;
+        {
+            let circular_buffer = &inner.lock().unwrap().circular_buffer;
+            match media_type {
+                MediaType::AUDIO => {
+                    let audio_index = notifier.lock().unwrap().audio_index;
+                    let index = self.find_receiver_next_index(
+                        audio_index,
+                        media_type,
+                        read_index,
+                        &circular_buffer,
+                    );
+                    notifier.lock().unwrap().audio_index = index;
+                    data_available = !self.is_read(read_index, index, &circular_buffer);
+                }
+                MediaType::VIDEO | MediaType::AV => {
+                    let video_index = notifier.lock().unwrap().video_index;
+                    let index = self.find_receiver_next_index(
+                        video_index,
+                        media_type,
+                        read_index,
+                        &circular_buffer,
+                    );
+                    notifier.lock().unwrap().video_index = index;
+                    data_available = !self.is_read(read_index, index, &circular_buffer);
+                }
+            }
 
-        if media_type == MediaType::AV {
-            self.set_receiver_read_ref(receiver_id, MediaType::AUDIO, data_avaliable);
-            self.set_receiver_read_ref(receiver_id, MediaType::VIDEO, data_avaliable);
-        } else {
-            self.set_receiver_read_ref(receiver_id, media_type, data_avaliable);
+            let video_index = notifier.lock().unwrap().video_index;
+            let audio_index = notifier.lock().unwrap().audio_index;
+            info!(
+                "notify read ready done, type: {:?}, audio: {}, video: {}, data_available: {:?}",
+                media_type, audio_index, video_index, data_available
+            );
         }
 
-        if !data_avaliable {
+        if media_type == MediaType::AV {
+            self.set_receiver_read_ref(read_index, MediaType::AUDIO, data_available);
+            self.set_receiver_read_ref(read_index, MediaType::VIDEO, data_available);
+        } else {
+            self.set_receiver_read_ref(read_index, media_type, data_available);
+        }
+
+        if !data_available {
             return;
         }
-
         inner
             .lock()
             .unwrap()
             .continue_notify
             .store(true, Ordering::Relaxed);
-
         inner.lock().unwrap().data_condvar.notify_one();
     }
 
-    pub fn read_buffer_data(&mut self, media_type: MediaType) -> Arc<Mutex<MediaData>> {
-        debug!("read buffer data");
+    pub fn read_buffer_data(
+        &mut self,
+        recv_id: u32,
+        media_type: MediaType,
+    ) -> (bool, Option<Arc<Mutex<MediaData>>>) {
+        debug!("read buffer data in");
         let inner = self.inner.clone();
-        let binding = inner.lock().unwrap();
-        let data = binding.circular_buffer.back();
-        data.unwrap().media_data.clone()
+
+        if !inner
+            .lock()
+            .unwrap()
+            .notifiers
+            .read()
+            .unwrap()
+            .contains_key(&recv_id)
+        {
+            error!("read error");
+            return (false, None);
+        }
+
+        let inner_lock = inner.lock().unwrap();
+        let binding = inner_lock.notifiers.read().unwrap();
+        let circular_buffer = &inner_lock.circular_buffer;
+
+        let notifier = binding.get(&recv_id).unwrap();
+
+        let mut index = notifier.lock().unwrap().get_receiver_read_index(media_type);
+        let read_index = notifier.lock().unwrap().get_read_index();
+
+        if index >= circular_buffer.len() as u32 {
+            error!(
+                "read error, read_index: {}, buffer len: {}",
+                index,
+                circular_buffer.len()
+            );
+            return (false, None);
+        }
+
+        // todo: key only
+
+        if self.is_data_read(read_index, circular_buffer.get(index as usize).unwrap()) {
+            self.updata_receiver_read_index(notifier.clone(), index, media_type, &circular_buffer);
+        }
+
+        index = notifier.lock().unwrap().get_receiver_read_index(media_type);
+        if index >= circular_buffer.len() as u32
+            || self.is_data_read(read_index, circular_buffer.get(index as usize).unwrap())
+        {
+            error!("already read");
+            return (false, None);
+        }
+
+        let data = circular_buffer.get(index as usize).unwrap();
+
+        data.reserve_flag.fetch_or(
+            0x1 << notifier.lock().unwrap().get_read_index(),
+            Ordering::Relaxed,
+        );
+
+        debug!("read buffer data in");
+        self.updata_receiver_read_index(notifier.clone(), index, media_type, &circular_buffer);
+        debug!("read buffer data in");
+
+        (true, Some(data.media_data.clone()))
     }
 
-    fn set_receiver_data_ref(&mut self, receiver_id: u32, media_type: MediaType, ready: bool) {
-        let inner = self.inner.clone();
-        info!("trace");
-        let notifiers = inner.lock().unwrap().notifiers.read().unwrap().clone();
-        let receiver = notifiers.get(&receiver_id).unwrap();
-        info!("trace");
+    pub fn clear_data_bit(&mut self, read_index: u32, media_type: MediaType) {
+        if media_type == MediaType::AV {
+            self.set_receiver_data_ref(read_index, media_type, false);
+        } else {
+            self.set_receiver_data_ref(read_index, MediaType::VIDEO, false);
+            self.set_receiver_data_ref(read_index, MediaType::AUDIO, false);
+        }
+    }
 
-        let index = receiver.lock().unwrap().get_read_index();
-        info!("trace");
+    pub fn clear_read_bit(&mut self, read_index: u32, media_type: MediaType) {
+        if media_type == MediaType::AV {
+            self.set_receiver_read_ref(read_index, media_type, false);
+        } else {
+            self.set_receiver_read_ref(read_index, MediaType::VIDEO, false);
+            self.set_receiver_read_ref(read_index, MediaType::AUDIO, false);
+        }
+    }
+
+    fn updata_receiver_read_index(
+        &mut self,
+        notifier: Arc<Mutex<DataNotifier>>,
+        index: u32,
+        media_type: MediaType,
+        circular_buffer: &VecDeque<DataSample>,
+    ) {
+        let next_index = self.find_receiver_next_index(
+            index,
+            media_type,
+            notifier.lock().unwrap().get_read_index(),
+            &circular_buffer,
+        );
+
+        if index == next_index {
+            return;
+        }
+        match media_type {
+            MediaType::AUDIO => notifier.lock().unwrap().audio_index = next_index,
+            MediaType::VIDEO => notifier.lock().unwrap().video_index = next_index,
+            MediaType::AV => {
+                notifier.lock().unwrap().video_index = next_index;
+                notifier.lock().unwrap().audio_index = next_index
+            }
+        }
+        let audio_index = notifier.lock().unwrap().audio_index;
+        let video_index = notifier.lock().unwrap().video_index;
+        info!(
+            "after update type: {:?}, audio_index: {}, video_index: {}",
+            media_type, audio_index, video_index
+        );
+    }
+
+    fn set_receiver_data_ref(&mut self, read_index: u32, media_type: MediaType, ready: bool) {
+        let inner = self.inner.clone();
+
+        let index = read_index;
 
         if index == INVALID_INDEX {
             return;
@@ -451,22 +697,12 @@ impl Dispatcher {
                 .data_ref
                 .fetch_and(bit_ref, Ordering::Relaxed);
         }
-        info!("trace");
     }
 
-    fn set_receiver_read_ref(&mut self, receiver_id: u32, media_type: MediaType, ready: bool) {
-        let mut index = INVALID_INDEX;
+    fn set_receiver_read_ref(&mut self, read_index: u32, media_type: MediaType, ready: bool) {
+        let mut index = read_index;
 
         let inner = self.inner.clone();
-        let notifiers = inner.lock().unwrap().notifiers.read().unwrap().clone();
-        if notifiers.contains_key(&receiver_id) {
-            index = notifiers
-                .get(&receiver_id)
-                .unwrap()
-                .lock()
-                .unwrap()
-                .get_read_index();
-        }
 
         if index == INVALID_INDEX {
             return;
@@ -499,7 +735,7 @@ impl Dispatcher {
     fn find_next_index(&self, index: u32, media_type: MediaType) -> u32 {
         let inner = self.inner.clone();
         let circular_buffer = &inner.lock().unwrap().circular_buffer;
-        if (index + 1) as usize >= circular_buffer.len() || index == INVALID_INDEX {
+        if index == INVALID_INDEX || (index + 1) as usize >= circular_buffer.len() {
             return index;
         }
         if media_type == MediaType::AV {
@@ -524,6 +760,42 @@ impl Dispatcher {
         return index;
     }
 
+    fn find_receiver_next_index(
+        &self,
+        index: u32,
+        media_type: MediaType,
+        read_index: u32,
+        circular_buffer: &VecDeque<DataSample>,
+    ) -> u32 {
+        if index == INVALID_INDEX || index + 1 >= circular_buffer.len() as u32 {
+            return index;
+        }
+
+        if !self.is_read(read_index, index, &circular_buffer) {
+            return index;
+        }
+
+        if media_type == MediaType::AV {
+            return index + 1;
+        }
+
+        for i in index + 1..circular_buffer.len() as u32 {
+            if circular_buffer
+                .get(i as usize)
+                .unwrap()
+                .media_data
+                .lock()
+                .unwrap()
+                .media_type
+                == media_type
+            {
+                return i;
+            }
+        }
+
+        return index;
+    }
+
     fn find_last_index(&self, media_type: MediaType) -> u32 {
         if self.inner.lock().unwrap().circular_buffer.is_empty() {
             return INVALID_INDEX;
@@ -535,34 +807,18 @@ impl Dispatcher {
         }
     }
 
-    fn is_read(&self, receiver_id: u32, index: u32) -> bool {
-        if index as usize >= self.inner.lock().unwrap().circular_buffer.len() {
+    fn is_read(&self, read_index: u32, index: u32, circular_buffer: &VecDeque<DataSample>) -> bool {
+        if index as usize >= circular_buffer.len() {
             return true;
         } else {
-            self.is_data_read(
-                receiver_id,
-                &self.inner.lock().unwrap().circular_buffer[index as usize],
-            )
+            self.is_data_read(read_index, &circular_buffer[index as usize])
         }
     }
 
-    fn is_data_read(&self, receiver_id: u32, data: &DataSample) -> bool {
-        let mut index = INVALID_INDEX;
-        let inner = self.inner.clone();
-        let notifiers = inner.lock().unwrap().notifiers.read().unwrap().clone();
-        if notifiers.contains_key(&receiver_id) {
-            index = notifiers
-                .get(&receiver_id)
-                .unwrap()
-                .lock()
-                .unwrap()
-                .get_read_index();
-        }
-
-        if index == INVALID_INDEX {
+    fn is_data_read(&self, read_index: u32, data: &DataSample) -> bool {
+        if read_index == INVALID_INDEX {
             return false;
         }
-
-        data.reserve_flag.load(Ordering::Relaxed) & 0x1 << index != 0
+        (data.reserve_flag.load(Ordering::Relaxed) & (0x0001 << read_index)) != 0
     }
 }

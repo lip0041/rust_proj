@@ -6,7 +6,7 @@ use std::{
     fmt::Debug,
     panic::Location,
     process,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     thread::{self, JoinHandle, ThreadId},
     time::Duration,
 };
@@ -70,7 +70,7 @@ impl BufferController {
 
             self.dummy_data.push(Arc::new(Mutex::new(media_data)));
         }
-
+        self.dummy_data[0].lock().unwrap().key_frame = true;
         self.dispatcher.lock().unwrap().start_dispatch();
     }
 
@@ -108,9 +108,10 @@ struct BufferReceiver {
     receiver: Arc<Receiver>,
     read_thread: Option<JoinHandle<()>>,
     reading: Arc<Mutex<bool>>,
-    count: Arc<Mutex<u32>>,
+    av_count: Arc<Mutex<u32>>,
     audio_count: Arc<Mutex<u32>>,
     video_count: Arc<Mutex<u32>>,
+    read_count: Arc<Mutex<u32>>,
 }
 
 impl BufferReceiver {
@@ -119,9 +120,10 @@ impl BufferReceiver {
             receiver: Arc::new(Receiver::new()),
             read_thread: None,
             reading: Arc::new(Mutex::new(false)),
-            count: Arc::new(Mutex::new(0)),
+            av_count: Arc::new(Mutex::new(0)),
             audio_count: Arc::new(Mutex::new(0)),
             video_count: Arc::new(Mutex::new(0)),
+            read_count: Arc::new(Mutex::new(0)),
         };
 
         dispatcher
@@ -139,42 +141,57 @@ impl BufferReceiver {
         let reading = self.reading.clone();
         *reading.lock().unwrap() = true;
         let receiver = self.receiver.clone();
-        let count = self.count.clone();
+        let av_count = self.av_count.clone();
         let audio_count = self.audio_count.clone();
         let video_count = self.video_count.clone();
+        let read_count = self.read_count.clone();
 
         self.read_thread = Some(thread::spawn(move || {
             while *reading.lock().unwrap() {
-                let out_data = receiver.request_read(media_type);
-                let data = out_data.lock().unwrap();
-
-                match media_type {
-                    MediaType::AUDIO => *audio_count.lock().unwrap() += 1,
-                    MediaType::VIDEO => *video_count.lock().unwrap() += 1,
-                    MediaType::AV => *count.lock().unwrap() += 1,
+                info!("request read in");
+                let (ret, out_data) = receiver.request_read(media_type);
+                info!("request read out");
+                *read_count.lock().unwrap() += 1;
+                if !ret {
+                    warn!("request read error");
+                    continue;
                 }
 
-                warn!(
-                    "read_type: {:?}, out_type: {:?}, pts: {:?}",
-                    media_type, data.media_type, data.pts
-                );
+                {
+                    let binding = out_data.unwrap();
+                    let data = binding.lock().unwrap();
+                    match data.media_type {
+                        MediaType::AUDIO => *audio_count.lock().unwrap() += 1,
+                        MediaType::VIDEO => *video_count.lock().unwrap() += 1,
+                        MediaType::AV => *av_count.lock().unwrap() += 1,
+                    }
+                    fatal!(
+                        "read_type: {:?}, out_type: {:?}, pts: {:?}",
+                        media_type,
+                        data.media_type,
+                        data.pts
+                    );
+                }
             }
 
             match media_type {
                 MediaType::AUDIO => fatal!(
-                    "read_type: {:?}, read done, read count: {}",
+                    "read_type: {:?}, read done, read count: {}, total count: {}",
                     media_type,
-                    *audio_count.lock().unwrap()
+                    *audio_count.lock().unwrap(),
+                    *read_count.lock().unwrap()
                 ),
                 MediaType::VIDEO => fatal!(
-                    "read_type: {:?}, read done, read count: {}",
+                    "read_type: {:?}, read done, read count: {}, total count: {}",
                     media_type,
-                    *video_count.lock().unwrap()
+                    *video_count.lock().unwrap(),
+                    *read_count.lock().unwrap()
                 ),
                 MediaType::AV => fatal!(
-                    "read_type: {:?}, read done, read count: {}",
+                    "read_type: {:?}, read done, read count: {}, total count: {}",
                     media_type,
-                    *count.lock().unwrap()
+                    *av_count.lock().unwrap(),
+                    *read_count.lock().unwrap()
                 ),
             }
         }));
@@ -196,13 +213,14 @@ impl BufferReceiver {
 
 fn main() {
     let mut controller = BufferController::new(30);
-    controller.generate_av_data();
 
+    controller.generate_av_data();
     let mut receiver = BufferReceiver::new(controller.dispatcher.clone());
-    thread::sleep(Duration::from_millis(500));
+    // thread::sleep(Duration::from_millis(500));
     controller.start_write();
 
     receiver.start_read(MediaType::VIDEO);
+    // thread::sleep(Duration::from_secs(10));
     while *controller.running.lock().unwrap() == true {
         warn!("wait 1s");
         thread::sleep(Duration::from_secs(1));
