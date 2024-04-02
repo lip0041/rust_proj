@@ -207,6 +207,12 @@ impl Dispatcher {
                 let data_ref = inner.lock().unwrap().data_ref.load(Ordering::Relaxed);
                 let recv_ref = inner.lock().unwrap().recv_ref.load(Ordering::Relaxed);
                 let notify_ref = data_ref & recv_ref;
+                fatal!(
+                    "data: {}, recv: {}, notify: {}",
+                    data_ref,
+                    recv_ref,
+                    notify_ref
+                );
                 for (recv_id, notifier) in notifiers.read().unwrap().clone() {
                     let read_index = notifier.lock().unwrap().get_read_index();
                     if 0x0001 << (read_index * 2) & notify_ref != 0
@@ -284,14 +290,16 @@ impl Dispatcher {
             error!("usable_ref: {} invalid", usable_ref);
             return;
         }
+        fatal!("read_flag: {}, usable_ref: {}", self.read_flag, usable_ref);
         self.read_flag |= usable_ref;
 
         let mut val = usable_ref;
         let mut read_index = 0;
-        while val != 0 {
+        while val != 1 {
             val >>= 1;
             read_index += 1;
         }
+        fatal!("read_flag: {}, read_index: {}", self.read_flag, read_index);
 
         receiver.set_read_index(read_index);
         notifier.set_read_index(read_index);
@@ -442,8 +450,9 @@ impl Dispatcher {
                 {
                     notifier.video_index = index;
                     fatal!(
-                        "recv_id: {}, activate video: {}",
+                        "recv_id: {}, read_index: {}, activate video: {}",
                         recv_id,
+                        notifier.get_read_index(),
                         notifier.video_index
                     );
                 }
@@ -458,8 +467,9 @@ impl Dispatcher {
                 {
                     notifier.audio_index = index;
                     fatal!(
-                        "recv_id: {}, activate audio: {}",
+                        "recv_id: {}, read_index: {}, activate audio: {}",
                         recv_id,
+                        notifier.get_read_index(),
                         notifier.audio_index
                     );
                 }
@@ -532,10 +542,10 @@ impl Dispatcher {
         }
 
         if media_type == MediaType::AV {
-            self.set_receiver_read_ref(read_index, MediaType::AUDIO, data_available);
-            self.set_receiver_read_ref(read_index, MediaType::VIDEO, data_available);
+            self.set_receiver_data_ref(read_index, MediaType::AUDIO, data_available);
+            self.set_receiver_data_ref(read_index, MediaType::VIDEO, data_available);
         } else {
-            self.set_receiver_read_ref(read_index, media_type, data_available);
+            self.set_receiver_data_ref(read_index, media_type, data_available);
         }
 
         if !data_available {
@@ -608,7 +618,6 @@ impl Dispatcher {
             Ordering::Relaxed,
         );
 
-        debug!("read buffer data in");
         self.updata_receiver_read_index(notifier.clone(), index, media_type, &circular_buffer);
         debug!("read buffer data in");
 
@@ -616,7 +625,7 @@ impl Dispatcher {
     }
 
     pub fn clear_data_bit(&mut self, read_index: u32, media_type: MediaType) {
-        if media_type == MediaType::AV {
+        if media_type != MediaType::AV {
             self.set_receiver_data_ref(read_index, media_type, false);
         } else {
             self.set_receiver_data_ref(read_index, MediaType::VIDEO, false);
@@ -625,7 +634,7 @@ impl Dispatcher {
     }
 
     pub fn clear_read_bit(&mut self, read_index: u32, media_type: MediaType) {
-        if media_type == MediaType::AV {
+        if media_type != MediaType::AV {
             self.set_receiver_read_ref(read_index, media_type, false);
         } else {
             self.set_receiver_read_ref(read_index, MediaType::VIDEO, false);
@@ -697,6 +706,10 @@ impl Dispatcher {
                 .data_ref
                 .fetch_and(bit_ref, Ordering::Relaxed);
         }
+        info!(
+            "after set ref, data: {}",
+            inner.lock().unwrap().data_ref.load(Ordering::Relaxed)
+        );
     }
 
     fn set_receiver_read_ref(&mut self, read_index: u32, media_type: MediaType, ready: bool) {
@@ -730,6 +743,10 @@ impl Dispatcher {
                 .recv_ref
                 .fetch_and(bit_ref, Ordering::Relaxed);
         }
+        info!(
+            "after set ref, recv: {}",
+            inner.lock().unwrap().recv_ref.load(Ordering::Relaxed)
+        );
     }
 
     fn find_next_index(&self, index: u32, media_type: MediaType) -> u32 {

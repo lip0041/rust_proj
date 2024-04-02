@@ -3,7 +3,7 @@ pub mod dispatcher;
 pub mod utils;
 use std::{
     borrow::BorrowMut,
-    fmt::Debug,
+    fmt::{Debug, Error},
     panic::Location,
     process,
     sync::{Arc, Mutex, RwLock},
@@ -12,6 +12,8 @@ use std::{
 };
 
 // use dispatcher::DispatcherReceiver;
+
+use stdext::function_name;
 
 use crate::{
     dispatcher::{
@@ -163,7 +165,10 @@ impl BufferReceiver {
                     match data.media_type {
                         MediaType::AUDIO => *audio_count.lock().unwrap() += 1,
                         MediaType::VIDEO => *video_count.lock().unwrap() += 1,
-                        MediaType::AV => *av_count.lock().unwrap() += 1,
+                        MediaType::AV => todo!(),
+                    }
+                    if (media_type == MediaType::AV) {
+                        *av_count.lock().unwrap() += 1;
                     }
                     fatal!(
                         "read_type: {:?}, out_type: {:?}, pts: {:?}",
@@ -201,6 +206,7 @@ impl BufferReceiver {
         debug!("stop read begin");
         *self.reading.lock().unwrap() = false;
         self.receiver.notify_read_stop();
+        info!("trace");
         self.read_thread
             .take()
             .unwrap()
@@ -213,7 +219,6 @@ impl BufferReceiver {
 
 fn main() {
     let mut controller = BufferController::new(30);
-
     controller.generate_av_data();
     let mut receiver = BufferReceiver::new(controller.dispatcher.clone());
     // thread::sleep(Duration::from_millis(500));
