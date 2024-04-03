@@ -18,9 +18,9 @@ use super::dispatcher::{self, Dispatcher};
 pub struct Receiver {
     id: u32,
     read_index: Mutex<u32>,
-    block_data: AtomicBool,
-    block_audio: AtomicBool,
-    block_video: AtomicBool,
+    requesting_media: AtomicBool,
+    requesting_audio: AtomicBool,
+    requesting_video: AtomicBool,
 
     first_audio: AtomicBool,
     first_video: AtomicBool,
@@ -47,9 +47,9 @@ impl Receiver {
         Receiver {
             id: 0,
             read_index: Mutex::new(0),
-            block_data: AtomicBool::new(true),
-            block_audio: AtomicBool::new(true),
-            block_video: AtomicBool::new(true),
+            requesting_media: AtomicBool::new(false),
+            requesting_audio: AtomicBool::new(false),
+            requesting_video: AtomicBool::new(false),
             first_audio: AtomicBool::new(true),
             first_video: AtomicBool::new(true),
             first_mix: AtomicBool::new(true),
@@ -117,15 +117,16 @@ impl Receiver {
             let lock = self.mutex.lock().unwrap();
             fatal!("request_read, type: {:?}", media_type);
             match media_type {
+                // wait utill the pred is false
                 MediaType::AUDIO => self
                     .notify_audio
-                    .wait_while(lock, |_| self.block_audio.load(Ordering::Relaxed)),
+                    .wait_while(lock, |_| !self.requesting_audio.load(Ordering::Relaxed)),
                 MediaType::VIDEO => self
                     .notify_video
-                    .wait_while(lock, |_| self.block_video.load(Ordering::Relaxed)),
+                    .wait_while(lock, |_| !self.requesting_video.load(Ordering::Relaxed)),
                 MediaType::AV => self
                     .notify_data
-                    .wait_while(lock, |_| self.block_data.load(Ordering::Relaxed)),
+                    .wait_while(lock, |_| !self.requesting_media.load(Ordering::Relaxed)),
             };
         }
         fatal!("request_read type: {:?} done", media_type);
@@ -148,9 +149,9 @@ impl Receiver {
         {
             let _lock = self.mutex.lock().unwrap();
             match media_type {
-                MediaType::AUDIO => self.block_audio.store(true, Ordering::Release),
-                MediaType::VIDEO => self.block_video.store(true, Ordering::Release),
-                MediaType::AV => self.block_data.store(true, Ordering::Release),
+                MediaType::AUDIO => self.requesting_audio.store(false, Ordering::Release),
+                MediaType::VIDEO => self.requesting_video.store(false, Ordering::Release),
+                MediaType::AV => self.requesting_media.store(false, Ordering::Release),
             };
         }
 
@@ -171,9 +172,10 @@ impl Receiver {
 
     pub fn notify_read_stop(&self) {
         info!("trace");
-        self.block_audio.store(false, Ordering::Relaxed);
-        self.block_video.store(false, Ordering::Relaxed);
-        self.block_data.store(false, Ordering::Relaxed);
+        let _lk = self.mutex.lock().unwrap();
+        self.requesting_audio.store(true, Ordering::Relaxed);
+        self.requesting_video.store(true, Ordering::Relaxed);
+        self.requesting_media.store(true, Ordering::Relaxed);
         self.notify_audio.notify_all();
         self.notify_video.notify_all();
         self.notify_data.notify_all();
@@ -181,36 +183,36 @@ impl Receiver {
 
     pub fn on_media_data(&self) {
         let _lk = self.mutex.lock().unwrap();
-        if self.block_data.load(Ordering::Relaxed) == false {
-            warn!("block in media");
+        if self.requesting_media.load(Ordering::Relaxed) {
+            warn!("requesting media");
             return;
         }
 
-        self.block_data.store(false, Ordering::Relaxed);
+        self.requesting_media.store(true, Ordering::Relaxed);
         self.notify_data.notify_one();
     }
 
     pub fn on_audio_data(&self) {
         let _lk = self.mutex.lock().unwrap();
-        if self.block_audio.load(Ordering::Relaxed) == false {
-            warn!("block in audio");
+        if self.requesting_audio.load(Ordering::Relaxed) {
+            warn!("requesting audio");
             return;
         }
 
-        self.block_audio.store(false, Ordering::Relaxed);
+        self.requesting_audio.store(true, Ordering::Relaxed);
         self.notify_audio.notify_one();
     }
 
     pub fn on_video_data(&self) {
         debug!("trace");
         let _lk = self.mutex.lock().unwrap();
-        if self.block_video.load(Ordering::Relaxed) == false {
-            warn!("block in video");
+        if self.requesting_video.load(Ordering::Relaxed) {
+            warn!("requesting video");
             return;
         }
 
         debug!("trace");
-        self.block_video.store(false, Ordering::Relaxed);
+        self.requesting_video.store(true, Ordering::Relaxed);
         self.notify_video.notify_one();
     }
 }

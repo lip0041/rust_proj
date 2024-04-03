@@ -224,7 +224,7 @@ fn main() {
     // thread::sleep(Duration::from_millis(500));
     controller.start_write();
 
-    receiver.start_read(MediaType::VIDEO);
+    receiver.start_read(MediaType::AV);
     // thread::sleep(Duration::from_secs(10));
     while *controller.running.lock().unwrap() == true {
         warn!("wait 1s");
