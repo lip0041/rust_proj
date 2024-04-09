@@ -4,7 +4,6 @@ use crate::utils::{
 };
 use crate::{debug, error, fatal, info, warn};
 use std::{
-    borrow::BorrowMut,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex, RwLock, Weak,
@@ -67,12 +66,31 @@ impl Receiver {
         self.mix_read.load(Ordering::Relaxed)
     }
 
+    pub fn is_key_read(&self) -> bool {
+        self.key_only.load(Ordering::Relaxed)
+    }
+
     pub fn set_read_index(&self, index: u32) {
         *self.read_index.lock().unwrap() = index;
     }
 
     pub fn get_read_index(&self) -> u32 {
         *self.read_index.lock().unwrap()
+    }
+
+    pub fn set_key_mode(&self, enable: bool) {
+        self.key_only.store(enable, Ordering::Relaxed);
+        if enable {
+            let dispatcher = self.dispatcher.lock().unwrap().upgrade();
+            if dispatcher.is_none() {
+                return;
+            }
+            dispatcher
+                .unwrap()
+                .lock()
+                .unwrap()
+                .clear_data_bit(self.get_read_index(), MediaType::VIDEO);
+        }
     }
 
     pub fn set_dispatcher(&self, new_dispatcher: Arc<Mutex<Dispatcher>>) {

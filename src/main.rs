@@ -134,7 +134,7 @@ impl BufferReceiver {
             .attach_receiver(receiver.receiver.clone());
 
         receiver.receiver.set_dispatcher(dispatcher.clone());
-
+        receiver.receiver.set_key_mode(true);
         receiver
     }
 
@@ -218,14 +218,13 @@ impl BufferReceiver {
 }
 
 fn main() {
-    let mut controller = BufferController::new(30);
+    let mut controller = BufferController::new(300);
     controller.generate_av_data();
     let mut receiver = BufferReceiver::new(controller.dispatcher.clone());
     // thread::sleep(Duration::from_millis(500));
     controller.start_write();
 
-    receiver.start_read(MediaType::AV);
-    // thread::sleep(Duration::from_secs(10));
+    receiver.start_read(MediaType::VIDEO);
     while *controller.running.lock().unwrap() == true {
         warn!("wait 1s");
         thread::sleep(Duration::from_secs(1));
