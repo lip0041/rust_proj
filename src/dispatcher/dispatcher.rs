@@ -214,7 +214,7 @@ impl Dispatcher {
                     recv_ref,
                     notify_ref
                 );
-                for (recv_id, notifier) in notifiers.read().unwrap().clone() {
+                for (recv_id, notifier) in notifiers.read().unwrap().iter() {
                     let read_index = notifier.lock().unwrap().get_read_index();
                     if 0x0001 << (read_index * 2) & notify_ref != 0
                         || 0x0001 << (read_index * 2 + 1) & notify_ref != 0
@@ -667,10 +667,11 @@ impl Dispatcher {
         self.video_frames = 0;
         let notifiers = inner.lock().unwrap().notifiers.clone();
 
-        for (recv_id, notifier) in &*notifiers.read().unwrap() {
+        for (recv_id, notifier) in notifiers.read().unwrap().iter() {
             notifier.lock().unwrap().audio_index = INVALID_INDEX;
             notifier.lock().unwrap().video_index = INVALID_INDEX;
         }
+
         self.video_activate = true;
         self.audio_activate = true;
         self.last_audio_index = INVALID_INDEX;
@@ -686,7 +687,7 @@ impl Dispatcher {
 
         let mut cnt = 0;
         let mut next_key = 0;
-        for key in &*key_index.read().unwrap() {
+        for key in key_index.read().unwrap().iter() {
             if circular_buffer
                 .read()
                 .unwrap()
@@ -728,7 +729,7 @@ impl Dispatcher {
                 circular_buffer.write().unwrap().pop_front();
             }
 
-            for key in &mut *key_index.write().unwrap() {
+            for key in key_index.write().unwrap().iter_mut() {
                 *key -= next_key;
             }
             fatal!(
@@ -738,7 +739,7 @@ impl Dispatcher {
             );
             self.last_audio_index -= next_key;
             self.last_video_index -= next_key;
-            for (recv_id, notifier) in &mut *notifiers.write().unwrap() {
+            for (recv_id, notifier) in notifiers.write().unwrap().iter_mut() {
                 if notifier.lock().unwrap().video_index != INVALID_INDEX {
                     notifier.lock().unwrap().video_index -= next_key;
                 }
@@ -764,7 +765,7 @@ impl Dispatcher {
         let mut bit_ref = 0x0000;
         let inner = self.inner.clone();
         let notifiers = inner.lock().unwrap().notifiers.clone();
-        for (recv_id, notifier) in &*notifiers.read().unwrap() {
+        for (recv_id, notifier) in notifiers.read().unwrap().iter() {
             let index = notifier.lock().unwrap().get_read_index();
             if media_type == MediaType::AUDIO {
                 bit_ref |= 0x1 << (index * 2);
@@ -796,7 +797,7 @@ impl Dispatcher {
         let inner = self.inner.clone();
         let notifiers = inner.lock().unwrap().notifiers.clone();
         let circular_buffer = inner.lock().unwrap().circular_buffer.clone();
-        for (recv_id, notifier) in &*notifiers.read().unwrap() {
+        for (recv_id, notifier) in notifiers.read().unwrap().iter() {
             let mut notifier = notifier.lock().unwrap();
 
             if media_type == MediaType::VIDEO {

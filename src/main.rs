@@ -84,7 +84,7 @@ impl BufferController {
         *running.lock().unwrap() = true;
         self.write_thread = Some(thread::spawn(move || {
             while *running.lock().unwrap() {
-                for data in &dummy {
+                for data in dummy.iter() {
                     dispatcher.lock().unwrap().input_data(data.clone());
                     thread::sleep(Duration::from_millis(25));
                 }
@@ -218,7 +218,7 @@ impl BufferReceiver {
 }
 
 fn main() {
-    let mut controller = BufferController::new(300);
+    let mut controller = BufferController::new(100);
     controller.generate_av_data();
     let mut receiver = BufferReceiver::new(controller.dispatcher.clone());
     // thread::sleep(Duration::from_millis(500));
